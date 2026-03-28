@@ -16,7 +16,7 @@ class General extends Component
 {
     use AuthorizesRequests;
 
-    public Server $server;
+    public ?Server $server = null;
 
     public StandaloneClickhouse $database;
 
@@ -35,6 +35,8 @@ class General extends Component
     public ?bool $isPublic = null;
 
     public ?int $publicPort = null;
+
+    public ?int $publicPortTimeout = 3600;
 
     public ?string $customDockerRunOptions = null;
 
@@ -56,8 +58,14 @@ class General extends Component
     public function mount()
     {
         try {
+            $this->authorize('view', $this->database);
             $this->syncData();
             $this->server = data_get($this->database, 'destination.server');
+            if (! $this->server) {
+                $this->dispatch('error', 'Database destination server is not configured.');
+
+                return;
+            }
         } catch (\Throwable $e) {
             return handleError($e, $this);
         }
@@ -74,6 +82,7 @@ class General extends Component
             'portsMappings' => 'nullable|string',
             'isPublic' => 'nullable|boolean',
             'publicPort' => 'nullable|integer',
+            'publicPortTimeout' => 'nullable|integer|min:1',
             'customDockerRunOptions' => 'nullable|string',
             'dbUrl' => 'nullable|string',
             'dbUrlPublic' => 'nullable|string',
@@ -93,6 +102,8 @@ class General extends Component
                 'image.required' => 'The Docker Image field is required.',
                 'image.string' => 'The Docker Image must be a string.',
                 'publicPort.integer' => 'The Public Port must be an integer.',
+                'publicPortTimeout.integer' => 'The Public Port Timeout must be an integer.',
+                'publicPortTimeout.min' => 'The Public Port Timeout must be at least 1.',
             ]
         );
     }
@@ -109,6 +120,7 @@ class General extends Component
             $this->database->ports_mappings = $this->portsMappings;
             $this->database->is_public = $this->isPublic;
             $this->database->public_port = $this->publicPort;
+            $this->database->public_port_timeout = $this->publicPortTimeout;
             $this->database->custom_docker_run_options = $this->customDockerRunOptions;
             $this->database->is_log_drain_enabled = $this->isLogDrainEnabled;
             $this->database->save();
@@ -124,6 +136,7 @@ class General extends Component
             $this->portsMappings = $this->database->ports_mappings;
             $this->isPublic = $this->database->is_public;
             $this->publicPort = $this->database->public_port;
+            $this->publicPortTimeout = $this->database->public_port_timeout;
             $this->customDockerRunOptions = $this->database->custom_docker_run_options;
             $this->isLogDrainEnabled = $this->database->is_log_drain_enabled;
             $this->dbUrl = $this->database->internal_db_url;
@@ -162,21 +175,20 @@ class General extends Component
 
                 return;
             }
-            if ($this->isPublic) {
-                if (! str($this->database->status)->startsWith('running')) {
-                    $this->dispatch('error', 'Database must be started to be publicly accessible.');
-                    $this->isPublic = false;
+            if ($this->isPublic && ! str($this->database->status)->startsWith('running')) {
+                $this->dispatch('error', 'Database must be started to be publicly accessible.');
+                $this->isPublic = false;
 
-                    return;
-                }
+                return;
+            }
+            $this->syncData(true);
+            if ($this->isPublic) {
                 StartDatabaseProxy::run($this->database);
                 $this->dispatch('success', 'Database is now publicly accessible.');
             } else {
                 StopDatabaseProxy::run($this->database);
                 $this->dispatch('success', 'Database is no longer publicly accessible.');
             }
-            $this->dbUrlPublic = $this->database->external_db_url;
-            $this->syncData(true);
         } catch (\Throwable $e) {
             $this->isPublic = ! $this->isPublic;
             $this->syncData(true);

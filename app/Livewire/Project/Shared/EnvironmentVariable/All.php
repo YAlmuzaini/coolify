@@ -25,6 +25,8 @@ class All extends Component
 
     public bool $is_env_sorting_enabled = false;
 
+    public bool $use_build_secrets = false;
+
     protected $listeners = [
         'saveKey' => 'submit',
         'refreshEnvs',
@@ -34,13 +36,14 @@ class All extends Component
     public function mount()
     {
         $this->is_env_sorting_enabled = data_get($this->resource, 'settings.is_env_sorting_enabled', false);
+        $this->use_build_secrets = data_get($this->resource, 'settings.use_build_secrets', false);
         $this->resourceClass = get_class($this->resource);
         $resourceWithPreviews = [\App\Models\Application::class];
         $simpleDockerfile = filled(data_get($this->resource, 'dockerfile'));
         if (str($this->resourceClass)->contains($resourceWithPreviews) && ! $simpleDockerfile) {
             $this->showPreview = true;
         }
-        $this->sortEnvironmentVariables();
+        $this->getDevView();
     }
 
     public function instantSave()
@@ -49,34 +52,104 @@ class All extends Component
             $this->authorize('manageEnvironment', $this->resource);
 
             $this->resource->settings->is_env_sorting_enabled = $this->is_env_sorting_enabled;
+            $this->resource->settings->use_build_secrets = $this->use_build_secrets;
             $this->resource->settings->save();
-            $this->sortEnvironmentVariables();
+            $this->getDevView();
             $this->dispatch('success', 'Environment variable settings updated.');
         } catch (\Throwable $e) {
             return handleError($e, $this);
         }
     }
 
-    public function sortEnvironmentVariables()
+    public function getEnvironmentVariablesProperty()
     {
-        if ($this->is_env_sorting_enabled === false) {
-            if ($this->resource->environment_variables) {
-                $this->resource->environment_variables = $this->resource->environment_variables->sortBy('order')->values();
-            }
+        $query = $this->resource->environment_variables()
+            ->orderByRaw("CASE WHEN is_required = true AND (value IS NULL OR value = '') THEN 0 ELSE 1 END");
 
-            if ($this->resource->environment_variables_preview) {
-                $this->resource->environment_variables_preview = $this->resource->environment_variables_preview->sortBy('order')->values();
-            }
+        if ($this->is_env_sorting_enabled) {
+            $query->orderBy('key');
+        } else {
+            $query->orderBy('order');
         }
 
-        $this->getDevView();
+        return $query->get();
+    }
+
+    public function getEnvironmentVariablesPreviewProperty()
+    {
+        $query = $this->resource->environment_variables_preview()
+            ->orderByRaw("CASE WHEN is_required = true AND (value IS NULL OR value = '') THEN 0 ELSE 1 END");
+
+        if ($this->is_env_sorting_enabled) {
+            $query->orderBy('key');
+        } else {
+            $query->orderBy('order');
+        }
+
+        return $query->get();
+    }
+
+    public function getHardcodedEnvironmentVariablesProperty()
+    {
+        return $this->getHardcodedVariables(false);
+    }
+
+    public function getHardcodedEnvironmentVariablesPreviewProperty()
+    {
+        return $this->getHardcodedVariables(true);
+    }
+
+    protected function getHardcodedVariables(bool $isPreview)
+    {
+        // Only for services and docker-compose applications
+        if ($this->resource->type() !== 'service' &&
+            ($this->resourceClass !== 'App\Models\Application' ||
+             ($this->resourceClass === 'App\Models\Application' && $this->resource->build_pack !== 'dockercompose'))) {
+            return collect([]);
+        }
+
+        $dockerComposeRaw = $this->resource->docker_compose_raw ?? $this->resource->docker_compose;
+
+        if (blank($dockerComposeRaw)) {
+            return collect([]);
+        }
+
+        // Extract all hard-coded variables
+        $hardcodedVars = extractHardcodedEnvironmentVariables($dockerComposeRaw);
+
+        // Filter out magic variables (SERVICE_FQDN_*, SERVICE_URL_*, SERVICE_NAME_*)
+        $hardcodedVars = $hardcodedVars->filter(function ($var) {
+            $key = $var['key'];
+
+            return ! str($key)->startsWith(['SERVICE_FQDN_', 'SERVICE_URL_', 'SERVICE_NAME_']);
+        });
+
+        // Filter out variables that exist in database (user has overridden/managed them)
+        // For preview, check against preview variables; for production, check against production variables
+        if ($isPreview) {
+            $managedKeys = $this->resource->environment_variables_preview()->pluck('key')->toArray();
+        } else {
+            $managedKeys = $this->resource->environment_variables()->where('is_preview', false)->pluck('key')->toArray();
+        }
+
+        $hardcodedVars = $hardcodedVars->filter(function ($var) use ($managedKeys) {
+            return ! in_array($var['key'], $managedKeys);
+        });
+
+        // Apply sorting based on is_env_sorting_enabled
+        if ($this->is_env_sorting_enabled) {
+            $hardcodedVars = $hardcodedVars->sortBy('key')->values();
+        }
+        // Otherwise keep order from docker-compose file
+
+        return $hardcodedVars;
     }
 
     public function getDevView()
     {
-        $this->variables = $this->formatEnvironmentVariables($this->resource->environment_variables);
+        $this->variables = $this->formatEnvironmentVariables($this->environmentVariables);
         if ($this->showPreview) {
-            $this->variablesPreview = $this->formatEnvironmentVariables($this->resource->environment_variables_preview);
+            $this->variablesPreview = $this->formatEnvironmentVariables($this->environmentVariablesPreview);
         }
     }
 
@@ -97,7 +170,7 @@ class All extends Component
     public function switch()
     {
         $this->view = $this->view === 'normal' ? 'dev' : 'normal';
-        $this->sortEnvironmentVariables();
+        $this->getDevView();
     }
 
     public function submit($data = null)
@@ -111,7 +184,7 @@ class All extends Component
             }
 
             $this->updateOrder();
-            $this->sortEnvironmentVariables();
+            $this->getDevView();
         } catch (\Throwable $e) {
             return handleError($e, $this);
         } finally {
@@ -205,6 +278,12 @@ class All extends Component
         $environment = $this->createEnvironmentVariable($data);
         $environment->order = $maxOrder + 1;
         $environment->save();
+
+        // Clear computed property cache to force refresh
+        unset($this->environmentVariables);
+        unset($this->environmentVariablesPreview);
+
+        $this->dispatch('success', 'Environment variable added.');
     }
 
     private function createEnvironmentVariable($data)
@@ -212,10 +291,12 @@ class All extends Component
         $environment = new EnvironmentVariable;
         $environment->key = $data['key'];
         $environment->value = $data['value'];
-        $environment->is_build_time = $data['is_build_time'] ?? false;
         $environment->is_multiline = $data['is_multiline'] ?? false;
         $environment->is_literal = $data['is_literal'] ?? false;
+        $environment->is_runtime = $data['is_runtime'] ?? true;
+        $environment->is_buildtime = $data['is_buildtime'] ?? true;
         $environment->is_preview = $data['is_preview'] ?? false;
+        $environment->comment = $data['comment'] ?? null;
         $environment->resourceable_id = $this->resource->id;
         $environment->resourceable_type = $this->resource->getMorphClass();
 
@@ -256,18 +337,37 @@ class All extends Component
     private function updateOrCreateVariables($isPreview, $variables)
     {
         $count = 0;
-        foreach ($variables as $key => $value) {
-            if (str($key)->startsWith('SERVICE_FQDN') || str($key)->startsWith('SERVICE_URL')) {
+        foreach ($variables as $key => $data) {
+            if (str($key)->startsWith('SERVICE_FQDN') || str($key)->startsWith('SERVICE_URL') || str($key)->startsWith('SERVICE_NAME')) {
                 continue;
             }
+
+            // Extract value and comment from parsed data
+            // Handle both array format ['value' => ..., 'comment' => ...] and plain string values
+            $value = is_array($data) ? ($data['value'] ?? '') : $data;
+            $comment = is_array($data) ? ($data['comment'] ?? null) : null;
+
             $method = $isPreview ? 'environment_variables_preview' : 'environment_variables';
             $found = $this->resource->$method()->where('key', $key)->first();
 
             if ($found) {
                 if (! $found->is_shown_once && ! $found->is_multiline) {
-                    // Only count as a change if the value actually changed
+                    $changed = false;
+
+                    // Update value if it changed
                     if ($found->value !== $value) {
                         $found->value = $value;
+                        $changed = true;
+                    }
+
+                    // Only update comment from inline comment if one is provided (overwrites existing)
+                    // If $comment is null, don't touch existing comment field to preserve it
+                    if ($comment !== null && $found->comment !== $comment) {
+                        $found->comment = $comment;
+                        $changed = true;
+                    }
+
+                    if ($changed) {
                         $found->save();
                         $count++;
                     }
@@ -276,7 +376,7 @@ class All extends Component
                 $environment = new EnvironmentVariable;
                 $environment->key = $key;
                 $environment->value = $value;
-                $environment->is_build_time = false;
+                $environment->comment = $comment; // Set comment from inline comment
                 $environment->is_multiline = false;
                 $environment->is_preview = $isPreview;
                 $environment->resourceable_id = $this->resource->id;
@@ -293,7 +393,9 @@ class All extends Component
     public function refreshEnvs()
     {
         $this->resource->refresh();
-        $this->sortEnvironmentVariables();
+        // Clear computed property cache to force refresh
+        unset($this->environmentVariables);
+        unset($this->environmentVariablesPreview);
         $this->getDevView();
     }
 }

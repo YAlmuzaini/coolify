@@ -63,16 +63,6 @@ class PublicGitRepository extends Component
 
     public bool $new_compose_services = false;
 
-    protected $rules = [
-        'repository_url' => ['required', 'string'],
-        'port' => 'required|numeric',
-        'isStatic' => 'required|boolean',
-        'publish_directory' => 'nullable|string',
-        'build_pack' => 'required|string',
-        'base_directory' => 'nullable|string',
-        'docker_compose_location' => 'nullable|string',
-    ];
-
     protected function rules()
     {
         return [
@@ -82,7 +72,7 @@ class PublicGitRepository extends Component
             'publish_directory' => 'nullable|string',
             'build_pack' => 'required|string',
             'base_directory' => 'nullable|string',
-            'docker_compose_location' => 'nullable|string',
+            'docker_compose_location' => \App\Support\ValidationPatterns::filePathRules(),
             'git_branch' => ['required', 'string', new ValidGitBranch],
         ];
     }
@@ -100,31 +90,11 @@ class PublicGitRepository extends Component
     public function mount()
     {
         if (isDev()) {
-            $this->repository_url = 'https://github.com/coollabsio/coolify-examples';
+            $this->repository_url = 'https://github.com/coollabsio/coolify-examples/tree/v4.x';
             $this->port = 3000;
         }
         $this->parameters = get_route_parameters();
         $this->query = request()->query();
-    }
-
-    public function updatedBaseDirectory()
-    {
-        if ($this->base_directory) {
-            $this->base_directory = rtrim($this->base_directory, '/');
-            if (! str($this->base_directory)->startsWith('/')) {
-                $this->base_directory = '/'.$this->base_directory;
-            }
-        }
-    }
-
-    public function updatedDockerComposeLocation()
-    {
-        if ($this->docker_compose_location) {
-            $this->docker_compose_location = rtrim($this->docker_compose_location, '/');
-            if (! str($this->docker_compose_location)->startsWith('/')) {
-                $this->docker_compose_location = '/'.$this->docker_compose_location;
-            }
-        }
     }
 
     public function updatedBuildPack()
@@ -176,13 +146,16 @@ class PublicGitRepository extends Component
                     str($this->repository_url)->startsWith('http://')) &&
                 ! str($this->repository_url)->endsWith('.git') &&
                 (! str($this->repository_url)->contains('github.com') ||
-                    ! str($this->repository_url)->contains('git.sr.ht'))
+                    ! str($this->repository_url)->contains('git.sr.ht')) &&
+                    ! str($this->repository_url)->contains('tangled')
             ) {
+
                 $this->repository_url = $this->repository_url.'.git';
             }
             if (str($this->repository_url)->contains('github.com') && str($this->repository_url)->endsWith('.git')) {
                 $this->repository_url = str($this->repository_url)->beforeLast('.git')->value();
             }
+
         } catch (\Throwable $e) {
             return handleError($e, $this);
         }
@@ -190,6 +163,9 @@ class PublicGitRepository extends Component
             $this->branchFound = false;
             $this->getGitSource();
             $this->getBranch();
+            if (str($this->repository_url)->contains('tangled')) {
+                $this->git_branch = 'master';
+            }
             $this->selectedBranch = $this->git_branch;
         } catch (\Throwable $e) {
             if ($this->rate_limit_remaining == 0) {
@@ -373,7 +349,7 @@ class PublicGitRepository extends Component
 
             $application->settings->is_static = $this->isStatic;
             $application->settings->save();
-            $fqdn = generateFqdn($destination->server, $application->uuid);
+            $fqdn = generateUrl(server: $destination->server, random: $application->uuid);
             $application->fqdn = $fqdn;
             $application->save();
             if ($this->checkCoolifyConfig) {

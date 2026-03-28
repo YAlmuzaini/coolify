@@ -10,6 +10,7 @@ use App\Notifications\Channels\SendsSlack;
 use App\Traits\HasNotificationSettings;
 use App\Traits\HasSafeStringAttribute;
 use Illuminate\Database\Eloquent\Casts\Attribute;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Notifications\Notifiable;
 use OpenApi\Attributes as OA;
@@ -37,7 +38,7 @@ use OpenApi\Attributes as OA;
 
 class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, SendsSlack
 {
-    use HasNotificationSettings, HasSafeStringAttribute, Notifiable;
+    use HasFactory, HasNotificationSettings, HasSafeStringAttribute, Notifiable;
 
     protected $guarded = [];
 
@@ -48,11 +49,14 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
     protected static function booted()
     {
         static::created(function ($team) {
-            $team->emailNotificationSettings()->create();
+            $team->emailNotificationSettings()->create([
+                'use_instance_email_settings' => isDev(),
+            ]);
             $team->discordNotificationSettings()->create();
             $team->slackNotificationSettings()->create();
             $team->telegramNotificationSettings()->create();
             $team->pushoverNotificationSettings()->create();
+            $team->webhookNotificationSettings()->create();
         });
 
         static::saving(function ($team) {
@@ -85,10 +89,13 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
         });
     }
 
-    public static function serverLimitReached()
+    public static function serverLimitReached(?Team $team = null)
     {
-        $serverLimit = Team::serverLimit();
-        $team = currentTeam();
+        $team = $team ?? currentTeam();
+        if (! $team) {
+            return true;
+        }
+        $serverLimit = Team::serverLimit($team);
         $servers = $team->servers->count();
 
         return $servers >= $serverLimit;
@@ -105,19 +112,23 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
 
     public function serverOverflow()
     {
-        if ($this->serverLimit() < $this->servers->count()) {
+        if (Team::serverLimit($this) < $this->servers->count()) {
             return true;
         }
 
         return false;
     }
 
-    public static function serverLimit()
+    public static function serverLimit(?Team $team = null)
     {
-        if (currentTeam()->id === 0 && isDev()) {
+        $team = $team ?? currentTeam();
+        if (! $team) {
+            return 0;
+        }
+        if ($team->id === 0 && isDev()) {
             return 9999999;
         }
-        $team = Team::find(currentTeam()->id);
+        $team = Team::find($team->id);
         if (! $team) {
             return 0;
         }
@@ -187,12 +198,18 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
             $this->getNotificationSettings('discord')?->isEnabled() ||
             $this->getNotificationSettings('slack')?->isEnabled() ||
             $this->getNotificationSettings('telegram')?->isEnabled() ||
-            $this->getNotificationSettings('pushover')?->isEnabled();
+            $this->getNotificationSettings('pushover')?->isEnabled() ||
+            $this->getNotificationSettings('webhook')?->isEnabled();
     }
 
     public function subscriptionEnded()
     {
+        if (! $this->subscription) {
+            return;
+        }
+
         $this->subscription->update([
+            'stripe_subscription_id' => null,
             'stripe_cancel_at_period_end' => false,
             'stripe_invoice_paid' => false,
             'stripe_trial_already_ended' => false,
@@ -256,6 +273,11 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
         return $this->hasMany(PrivateKey::class);
     }
 
+    public function cloudProviderTokens()
+    {
+        return $this->hasMany(CloudProviderToken::class);
+    }
+
     public function sources()
     {
         $sources = collect([]);
@@ -304,5 +326,10 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
     public function pushoverNotificationSettings()
     {
         return $this->hasOne(PushoverNotificationSettings::class);
+    }
+
+    public function webhookNotificationSettings()
+    {
+        return $this->hasOne(WebhookNotificationSettings::class);
     }
 }

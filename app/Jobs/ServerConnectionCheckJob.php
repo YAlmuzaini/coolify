@@ -54,6 +54,11 @@ class ServerConnectionCheckJob implements ShouldBeEncrypted, ShouldQueue
                 return;
             }
 
+            // Check Hetzner server status if applicable
+            if ($this->server->hetzner_server_id && $this->server->cloudProviderToken) {
+                $this->checkHetznerStatus();
+            }
+
             // Temporarily disable mux if requested
             if ($this->disableMux) {
                 $this->disableSshMux();
@@ -78,21 +83,62 @@ class ServerConnectionCheckJob implements ShouldBeEncrypted, ShouldQueue
             }
 
             // Server is reachable, check if Docker is available
-            // $isUsable = $this->checkDockerAvailability();
+            $isUsable = $this->checkDockerAvailability();
 
             $this->server->settings->update([
                 'is_reachable' => true,
-                'is_usable' => true,
+                'is_usable' => $isUsable,
             ]);
 
         } catch (\Throwable $e) {
+
+            Log::error('ServerConnectionCheckJob failed', [
+                'error' => $e->getMessage(),
+                'server_id' => $this->server->id,
+            ]);
             $this->server->settings->update([
                 'is_reachable' => false,
                 'is_usable' => false,
             ]);
 
-            throw $e;
+            return;
         }
+    }
+
+    public function failed(?\Throwable $exception): void
+    {
+        if ($exception instanceof \Illuminate\Queue\TimeoutExceededException) {
+            $this->server->settings->update([
+                'is_reachable' => false,
+                'is_usable' => false,
+            ]);
+
+            // Delete the queue job so it doesn't appear in Horizon's failed list.
+            $this->job?->delete();
+        }
+    }
+
+    private function checkHetznerStatus(): void
+    {
+        $status = null;
+
+        try {
+            $hetznerService = new \App\Services\HetznerService($this->server->cloudProviderToken->token);
+            $serverData = $hetznerService->getServer($this->server->hetzner_server_id);
+            $status = $serverData['status'] ?? null;
+
+        } catch (\Throwable) {
+            // Silently ignore — server may have been deleted from Hetzner.
+        }
+        if ($this->server->hetzner_server_status !== $status) {
+            $this->server->update(['hetzner_server_status' => $status]);
+            $this->server->hetzner_server_status = $status;
+            if ($status === 'off') {
+                ray('Server is powered off, marking as unreachable');
+                throw new \Exception('Server is powered off');
+            }
+        }
+
     }
 
     private function checkConnection(): bool

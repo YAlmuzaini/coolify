@@ -5,44 +5,46 @@
             @can('update', $application)
                 <x-forms.button type="submit">Save</x-forms.button>
             @endcan
-            <a target="_blank" class="hover:no-underline" href="{{ $application?->gitBranchLocation }}">
-                <x-forms.button>
+            <div class="flex items-center gap-4 px-2">
+                <a target="_blank" class="hover:no-underline flex items-center gap-1"
+                    href="{{ $application?->gitBranchLocation }}">
                     Open Repository
                     <x-external-link />
-                </x-forms.button>
-            </a>
-            @if (data_get($application, 'source.is_public') === false)
-                <a target="_blank" class="hover:no-underline" href="{{ getInstallationPath($application->source) }}">
-                    <x-forms.button>
+                </a>
+                @if (data_get($application, 'source.is_public') === false)
+                    <a target="_blank" class="hover:no-underline flex items-center gap-1"
+                        href="{{ getInstallationPath($application->source) }}">
                         Open Git App
                         <x-external-link />
-                    </x-forms.button>
-                </a>
-            @endif
-            <a target="_blank" class="flex hover:no-underline" href="{{ $application?->gitCommits }}">
-                <x-forms.button>Open Commits on Git
+                    </a>
+                @endif
+                <a target="_blank" class="flex hover:no-underline items-center gap-1"
+                    href="{{ $application?->gitCommits }}">
+                    Open Commits on Git
                     <x-external-link />
-                </x-forms.button>
-            </a>
+                </a>
+            </div>
         </div>
         <div class="pb-4">Code source of your application.</div>
 
         <div class="flex flex-col gap-2">
-            @if (!$privateKeyId)
+            @if (blank($privateKeyId))
                 <div>Currently connected source: <span
                         class="font-bold text-warning">{{ data_get($application, 'source.name', 'No source connected') }}</span>
                 </div>
             @endif
             <div class="flex gap-2">
-                <x-forms.input placeholder="coollabsio/coolify-example" id="gitRepository" label="Repository" canGate="update" :canResource="$application" />
+                <x-forms.input placeholder="coollabsio/coolify-example" id="gitRepository" label="Repository"
+                    canGate="update" :canResource="$application" />
                 <x-forms.input placeholder="main" id="gitBranch" label="Branch" canGate="update" :canResource="$application" />
             </div>
             <div class="flex items-end gap-2">
-                <x-forms.input placeholder="HEAD" id="gitCommitSha" placeholder="HEAD" label="Commit SHA" canGate="update" :canResource="$application" />
+                <x-forms.input placeholder="HEAD" id="gitCommitSha" placeholder="HEAD" label="Commit SHA"
+                    canGate="update" :canResource="$application" />
             </div>
         </div>
 
-        @if ($privateKeyId)
+        @if (filled($privateKeyId))
             <h3 class="pt-4">Deploy Key</h3>
             <div class="py-2 pt-4">Currently attached Private Key: <span
                     class="dark:text-warning">{{ $privateKeyName }}</span>
